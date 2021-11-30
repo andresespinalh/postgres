@@ -2846,13 +2846,184 @@ neqjoinsel(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(result);
 }
 
+#ifdef NOT_IMPLEMENTED
+double
+mcv_join_selectivity(PlannerInfo *root, Oid operator, bool isgt, bool iseq,
+			  Oid collation,
+			  VariableStatData *vardata1, VariableStatData *vardata2, double *sumcommonp)
+{
+
+	double		mcv_selec,
+				sumcommon;
+	AttStatsSlot sslot1, sslot2;
+	FmgrInfo	opproc;
+	int			i;
+
+	mcv_selec = 0.0;
+	sumcommon = 0.0;
+
+	fmgr_info(get_opcode(operator), &opproc);
+
+	if (HeapTupleIsValid(vardata2->statsTuple) &&
+		statistic_proc_security_check(vardata2, opproc.fn_oid) &&
+		get_attstatsslot(&sslot2, vardata2->statsTuple,
+						 STATISTIC_KIND_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
+	{
+
+		/*
+		 * For all values and respective frequencies in vardata2's MCV, 
+		 * add up scalarineqsel(vardata1 OP value) * frequency
+		 */
+		for (i = 0; i < sslot2.nvalues; i++)
+		{
+			mcv_selec += scalarineqsel(root, operator, isgt, iseq, collation, vardata1, 
+							sslot2.values[i], sslot2.valuetype) * sslot2.numbers[i];
+			sumcommon += sslot2.numbers[i];
+		}
+		free_attstatsslot(&sslot2);
+	}
+
+	*sumcommonp = sumcommon;
+	return mcv_selec;
+}
+
+static double
+ineq_histogram_join_selectivity(PlannerInfo *root, Oid operator, bool isgt, bool iseq,
+			  Oid collation, VariableStatData *vardata1, VariableStatData *vardata2)
+{
+	// TODO: Implement this
+	return DEFAULT_INEQ_SEL;
+}
+
+static double
+scalarineqjoinsel(PlannerInfo *root, Oid operator, bool isgt, bool iseq,
+			  Oid collation, VariableStatData *vardata1, VariableStatData *vardata2)
+{
+
+	Form_pg_statistic stats1, stats2;
+	FmgrInfo	opproc;
+	double		mcv_selec,
+				hist_selec,
+				sumcommon;
+	double		selec;
+
+	if (!HeapTupleIsValid(vardata1->statsTuple) || !HeapTupleIsValid(vardata2->statsTuple))
+	{
+		/* no stats available, so default result */
+		return DEFAULT_INEQ_SEL;
+	}
+	stats1 = (Form_pg_statistic) GETSTRUCT(vardata1->statsTuple);
+	stats2 = (Form_pg_statistic) GETSTRUCT(vardata2->statsTuple);
+
+	// TODO: Rectify comment
+	/*
+	 * If we have most-common-values info, add up the fractions of the MCV
+	 * entries that satisfy MCV OP CONST.  These fractions contribute directly
+	 * to the result selectivity.  Also add up the total fraction represented
+	 * by MCV entries.
+	 */
+	mcv_selec = mcv_join_selectivity(root, operator, isgt, iseq, collation, vardata1, vardata2, &sumcommon);
+
+	// TODO: Rectify comment
+	/*
+	 * If there is a histogram, determine which bin the constant falls in, and
+	 * compute the resulting contribution to selectivity.
+	 */
+	hist_selec = ineq_histogram_join_selectivity(root, operator, isgt, iseq, collation, vardata1, vardata2);
+
+	/*
+	 * Now merge the results from the MCV and histogram calculations,
+	 * realizing that the histogram covers only the non-null values that are
+	 * not listed in MCV.
+	 */
+	selec = 1.0 - stats1->stanullfrac - sumcommon;
+
+	if (hist_selec >= 0.0)
+		selec *= hist_selec;
+	else
+	{
+		/*
+		 * If no histogram but there are values not accounted for by MCV,
+		 * arbitrarily assume half of them will match.
+		 */
+		selec *= 0.5;
+	}
+
+	selec += mcv_selec;
+
+	/* result should be in range, but make sure... */
+	CLAMP_PROBABILITY(selec);
+
+	return selec;
+
+}
+#endif
+
+/*
+ * Common wrapper function for the join cardinality estimators that simply
+ * invoke scalarineqjoinsel().
+ */
+static Datum
+scalarineqjoinsel_wrapper(PG_FUNCTION_ARGS, bool isgt, bool iseq)
+{
+
+	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
+	Oid			operator = PG_GETARG_OID(1);
+	List		*args = (List *) PG_GETARG_POINTER(2);
+	JoinType	jointype = (JoinType) PG_GETARG_INT16(3);
+	SpecialJoinInfo	*sjinfo = PG_GETARG_POINTER(4);
+	Oid			collation = PG_GET_COLLATION();
+	VariableStatData vardata1;
+	VariableStatData vardata2;
+	bool		reversed;
+	double		selec;
+
+	switch (operator)
+	{
+		case OID_RANGE_LEFT_OP:
+			// TODO: Convert from range to scalar ineq if it is a range operation (validate ranges first)
+			PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+			break;		
+		default:
+			// TODO: Implement scalarineqjoinsel
+			PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	}
+
+	get_join_variables(root, args, sjinfo, &vardata1, &vardata2, &reversed);
+
+	/*
+	 * Make sure variables are not reversed to simplify logic in scalarineqjoinsel.
+	 */
+	if (reversed)
+	{
+		operator = get_commutator(operator);
+		if (!operator)
+		{
+			/* Use default selectivity (should we raise an error instead?) */
+			ReleaseVariableStats(vardata1);
+			ReleaseVariableStats(vardata2);
+			PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+		}
+		isgt = !isgt;
+	}
+
+	/* The rest of the work is done by scalarineqjoinsel(). */
+	selec = scalarineqjoinsel(root, operator, isgt, iseq, collation,
+						  &vardata1, &vardata2);
+
+	ReleaseVariableStats(vardata1);
+	ReleaseVariableStats(vardata2);
+
+	PG_RETURN_FLOAT8((float8) selec);
+}
 /*
  *		scalarltjoinsel - Join selectivity of "<" for scalars
  */
 Datum
 scalarltjoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	return scalarineqjoinsel_wrapper(fcinfo, false, false);
 }
 
 /*
@@ -2861,7 +3032,7 @@ scalarltjoinsel(PG_FUNCTION_ARGS)
 Datum
 scalarlejoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	return scalarineqjoinsel_wrapper(fcinfo, false, true);
 }
 
 /*
@@ -2870,7 +3041,7 @@ scalarlejoinsel(PG_FUNCTION_ARGS)
 Datum
 scalargtjoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	return scalarineqjoinsel_wrapper(fcinfo, true, false);
 }
 
 /*
@@ -2879,7 +3050,7 @@ scalargtjoinsel(PG_FUNCTION_ARGS)
 Datum
 scalargejoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	return scalarineqjoinsel_wrapper(fcinfo, true, true);
 }
 
 

@@ -103,6 +103,410 @@ default_range_selectivity(Oid operator)
 }
 
 /*
+ * Look up the fraction of values less than (or equal, if 'equal' argument
+ * is true) a given const in the most common values.
+ */
+double
+calc_mcv_selectivity_scalar(TypeCacheEntry *typcache, const RangeBound *value, 
+							const RangeBound *mcv, double *mcvf, int nmcv, 
+							bool equal, double *sumcommonp)
+{
+
+	double		mcv_selec, sumcommon;
+	int			i, cmp;
+
+	mcv_selec = 0.0;
+	sumcommon = 0.0;
+	
+	for (i = 0; i < nmcv; i++)
+	{
+		cmp = range_cmp_bounds(typcache, &(mcv[i]), value);
+		if (cmp < 0 || (equal && cmp == 0))
+			mcv_selec += mcvf[i];
+		sumcommon += mcvf[i];
+	}
+
+	*sumcommonp = sumcommon;
+	return mcv_selec;
+}
+
+/*
+ * Calculate selectivity of < and <= using histograms and most common values
+ */
+double
+scalar_lt_selectivity(TypeCacheEntry *typcache, const RangeBound *mcv, double *mcvf, 
+					int nmcv, const RangeBound *hist, int nhist, double nullfrac, 
+					double emptyfrac, const RangeBound *value, bool equal)
+{
+
+	double		mcv_selec,
+				hist_selec,
+				sumcommon;
+	double		selec;
+	
+	mcv_selec = calc_mcv_selectivity_scalar(typcache, value, mcv, mcvf, nmcv, equal, &sumcommon);
+	hist_selec = calc_hist_selectivity_scalar(typcache, value, hist, nhist, equal);
+
+	/*
+	 * Now merge the results from the MCV and histogram calculations,
+	 * realizing that the histogram covers only the non-null and non-empty 
+	 * values that are not listed in MCV.
+	 */
+	selec = 1.0 - nullfrac - emptyfrac - sumcommon;
+
+	if (hist_selec >= 0.0)
+		selec *= hist_selec;
+	else
+	{
+		/*
+		 * If no histogram but there are values not accounted for by MCV,
+		 * arbitrarily assume half of them will match.
+		 */
+		selec *= 0.5;
+	}
+
+	selec += mcv_selec;
+
+	/* result should be in range, but make sure... */
+	CLAMP_PROBABILITY(selec);
+
+	return selec;
+
+}
+
+/*
+ * Calculate MCV contribution for join cardinality estimation
+ * of < and <= using histograms and most common values
+ */
+double
+mcv_lt_join_selectivity(TypeCacheEntry *typcache, const RangeBound *mcv1, double *mcvf1, 
+					int nmcv1, const RangeBound *hist1, int nhist1, double nullfrac1, double emptyfrac1,
+					const RangeBound *mcv2, double *mcvf2, int nmcv2, bool equal, double *sumcommonp)
+{
+
+	double		mcv_selec, sumcommon;
+	int			i;
+
+	mcv_selec = 0.0;
+	sumcommon = 0.0;
+	
+	for (i = 0; i < nmcv2; i++)
+	{
+		mcv_selec += scalar_lt_selectivity(typcache, mcv1, mcvf1, nmcv1, hist1, nhist1, nullfrac1, emptyfrac1, &(mcv2[i]), equal)  * mcvf2[i];
+		sumcommon += mcvf2[i];
+	}
+
+	*sumcommonp = sumcommon;
+	return mcv_selec;
+}
+
+/*
+ * Calculate MCV contribution for join cardinality estimation
+ * of < and <= using histograms and most common values
+ */
+double
+histogram_lt_join_selectivity(TypeCacheEntry *typcache, const RangeBound *mcv1, double *mcvf1, 
+					int nmcv1, const RangeBound *hist1, int nhist1, double nullfrac1, double emptyfrac1,
+					const RangeBound *mcv2, double *mcvf2, int nmcv2, const RangeBound *hist2, int nhist2, 
+					double nullfrac2, double emptyfrac2, bool equal)
+{
+	// TODO: Implement this
+	return DEFAULT_INEQ_SEL;
+}
+
+
+calc_joint_lt_selectivity(TypeCacheEntry *typcache, const RangeBound *mcv1, double *mcvf1, 
+					int nmcv1, const RangeBound *hist1, int nhist1, double nullfrac1, double emptyfrac1,
+					const RangeBound *mcv2, double *mcvf2, int nmcv2, const RangeBound *hist2, int nhist2, 
+					double nullfrac2, double emptyfrac2, bool equal) {
+
+	double		mcv_selec,
+				hist_selec,
+				sumcommon;
+	double		selec;
+	
+	mcv_selec = mcv_lt_join_selectivity(typcache, mcv1, mcvf1, nmcv1, hist1, nhist1, nullfrac1, emptyfrac1, mcv2, mcvf2, nmcv2, equal, &sumcommon);
+	hist_selec = histogram_lt_join_selectivity(typcache, mcv1, mcvf1, nmcv1, hist1, nhist1, nullfrac1, emptyfrac1, mcv2, mcvf2, nmcv2, hist2, nhist2, nullfrac2, emptyfrac2, equal);
+
+	/*
+	 * Now merge the results from the MCV and histogram calculations,
+	 * realizing that the histogram covers only the non-null and non-empty
+	 * values that are not listed in MCV.
+	 */
+	selec = 1.0 - nullfrac2 - emptyfrac2 - sumcommon;
+
+	if (hist_selec >= 0.0)
+		selec *= hist_selec;
+	else
+	{
+		/*
+		 * If no histogram but there are values not accounted for by MCV,
+		 * arbitrarily assume half of them will match.
+		 */
+		selec *= 0.5;
+	}
+
+	selec += mcv_selec;
+
+	/* result should be in range, but make sure... */
+	CLAMP_PROBABILITY(selec);
+
+	return selec;
+
+}
+
+/*
+ * rangejoinsel -- join cardinality for range operators
+ */
+Datum
+rangejoinsel(PG_FUNCTION_ARGS)
+{
+
+	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
+	Oid			operator = PG_GETARG_OID(1);
+	List		*args = (List *) PG_GETARG_POINTER(2);
+	JoinType	jointype = (JoinType) PG_GETARG_INT16(3);
+	SpecialJoinInfo	*sjinfo = PG_GETARG_POINTER(4);
+	Oid			collation = PG_GET_COLLATION();
+	VariableStatData vardata1, vardata2;
+	AttStatsSlot mcvstats1_lower, mcvstats1_upper, histstats1;
+	AttStatsSlot mcvstats2_lower, mcvstats2_upper, histstats2;
+	bool		reversed;
+	Selectivity	selec;
+	TypeCacheEntry *typcache = NULL;
+	Form_pg_statistic stats1, stats2;
+	AttStatsSlot sslot;
+	double empty_frac1, null_frac1, *mcvf1_upper, *mcvf1_lower;
+	double empty_frac2, null_frac2, *mcvf2_upper, *mcvf2_lower;
+	const RangeBound *hist1_lower, *hist1_upper, *mcv1_lower, *mcv1_upper;
+	const RangeBound *hist2_lower, *hist2_upper, *mcv2_lower, *mcv2_upper;
+	int nstats1, nstats2;
+	int i;
+	bool empty;
+
+	get_join_variables(root, args, sjinfo, &vardata1, &vardata2, &reversed);
+
+	selec = default_range_selectivity(operator);
+
+	if (HeapTupleIsValid(vardata1.statsTuple) &&
+		get_attstatsslot(&mcvstats1_lower, vardata1.statsTuple,
+						 STATISTIC_KIND_LOWER_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
+		get_attstatsslot(&mcvstats1_upper, vardata1.statsTuple,
+						 STATISTIC_KIND_UPPER_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
+		get_attstatsslot(&histstats1, vardata1.statsTuple,
+						 STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
+						 ATTSTATSSLOT_VALUES) &&
+		HeapTupleIsValid(vardata2.statsTuple) &&
+		get_attstatsslot(&mcvstats2_lower, vardata2.statsTuple,
+						 STATISTIC_KIND_LOWER_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
+		get_attstatsslot(&mcvstats2_upper, vardata2.statsTuple,
+						 STATISTIC_KIND_UPPER_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
+		get_attstatsslot(&histstats2, vardata2.statsTuple,
+						 STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
+						 ATTSTATSSLOT_VALUES) &&
+		vardata1.vartype == vardata2.vartype){
+
+		/*
+		* First look up the fraction of NULLs and empty ranges from pg_statistic.
+		*/
+		stats1 = (Form_pg_statistic) GETSTRUCT(vardata1.statsTuple);
+		stats2 = (Form_pg_statistic) GETSTRUCT(vardata2.statsTuple);
+
+		null_frac1 = stats1->stanullfrac;
+		null_frac2 = stats2->stanullfrac;
+
+		/* Try to get fraction of empty ranges */
+		if (get_attstatsslot(&sslot, vardata1.statsTuple,
+							 STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM,
+							 InvalidOid,
+							 ATTSTATSSLOT_NUMBERS))
+		{
+			if (sslot.nnumbers != 1)
+				elog(ERROR, "invalid empty fraction statistic");	/* shouldn't happen */
+			empty_frac1 = sslot.numbers[0];
+			free_attstatsslot(&sslot);
+		}
+		else
+		{
+			/* No empty fraction statistic. Assume no empty ranges. */
+			empty_frac1 = 0.0;
+		}
+
+		/* Try to get fraction of empty ranges */
+		if (get_attstatsslot(&sslot, vardata2.statsTuple,
+							 STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM,
+							 InvalidOid,
+							 ATTSTATSSLOT_NUMBERS))
+		{
+			if (sslot.nnumbers != 1)
+				elog(ERROR, "invalid empty fraction statistic");	/* shouldn't happen */
+			empty_frac2 = sslot.numbers[0];
+			free_attstatsslot(&sslot);
+		}
+		else
+		{
+			/* No empty fraction statistic. Assume no empty ranges. */
+			empty_frac2 = 0.0;
+		}
+
+		/*
+		* Convert histograms of ranges into histograms of their lower and upper
+		* bounds for the first variable.
+		*/
+		nstats1 = histstats1.nvalues;
+		hist1_lower = (RangeBound *) palloc(sizeof(RangeBound) * nstats1);
+		hist1_upper = (RangeBound *) palloc(sizeof(RangeBound) * nstats1);
+		for (i = 0; i < nstats1; i++)
+		{
+			range_deserialize(typcache, DatumGetRangeTypeP(histstats1.values[i]),
+							&hist1_lower[i], &hist1_upper[i], &empty);
+			/* The histogram should not contain any empty ranges */
+			if (empty)
+				elog(ERROR, "bounds histogram contains an empty range");
+		}
+
+		// TODO: How to extract mcv statistics?
+		mcv1_lower = (RangeBound *) palloc(sizeof(RangeBound) * nstats1);
+		mcvf1_lower = (double *) palloc(sizeof(double) * nstats1);
+		mcv1_upper = (RangeBound *) palloc(sizeof(RangeBound) * nstats1);
+		mcvf1_upper = (double *) palloc(sizeof(double) * nstats1);
+
+
+		/*
+		* Convert histograms of ranges into histograms of their lower and upper
+		* bounds for the second variable.
+		*/
+		nstats2 = histstats2.nvalues;
+		hist2_lower = (RangeBound *) palloc(sizeof(RangeBound) * nstats2);
+		hist2_upper = (RangeBound *) palloc(sizeof(RangeBound) * nstats2);
+		for (i = 0; i < nstats2; i++)
+		{
+			range_deserialize(typcache, DatumGetRangeTypeP(histstats2.values[i]),
+							&hist2_lower[i], &hist2_upper[i], &empty);
+			/* The histogram should not contain any empty ranges */
+			if (empty)
+				elog(ERROR, "bounds histogram contains an empty range");
+		}
+
+		// TODO: How to extract mcv statistics?
+		mcv2_lower = (RangeBound *) palloc(sizeof(RangeBound) * nstats2);
+		mcvf2_lower = (double *) palloc(sizeof(double) * nstats2);
+		mcv2_upper = (RangeBound *) palloc(sizeof(RangeBound) * nstats2);
+		mcvf2_upper = (double *) palloc(sizeof(double) * nstats2);
+
+		// TODO: Confirm this is how we should translate operations
+		typcache = range_get_typcache(fcinfo, vardata1.vartype);
+		switch(operator) {
+			case OID_RANGE_OVERLAP_OP:
+				/* 
+				 * Selectivity of A && B =
+				 * Selectivity of NOT( A << B || A >> B ) = 
+				 * 1 - Selectivity of A.upper < B.lower - Selectivity of B.upper < A.lower
+				 */
+				selec = 1;
+				selec -= calc_joint_lt_selectivity(typcache, 
+												mcv1_upper, mcvf1_upper, nstats1, 
+												hist1_upper, nstats1, null_frac1, empty_frac1, 
+												mcv2_lower, mcvf2_lower, nstats2, 
+												hist2_lower, nstats2, null_frac2, empty_frac2, false);
+				selec -= calc_joint_lt_selectivity(typcache, 
+												mcv2_upper, mcvf2_upper, nstats2, 
+												hist2_upper, nstats2, null_frac2, empty_frac2, 
+												mcv1_lower, mcvf1_lower, nstats1, 
+												hist1_lower, nstats1, null_frac1, empty_frac1, false);
+				break;
+			
+			case OID_RANGE_LESS_OP:
+				selec = calc_joint_lt_selectivity(typcache, 
+												mcv1_lower, mcvf1_lower, nstats1, 
+												hist1_lower, nstats1, null_frac1, empty_frac1, 
+												mcv2_lower, mcvf2_lower, nstats2, 
+												hist2_lower, nstats2, null_frac2, empty_frac2, false);
+				break;
+
+			case OID_RANGE_LESS_EQUAL_OP:
+				selec = calc_joint_lt_selectivity(typcache, 
+												mcv1_lower, mcvf1_lower, nstats1, 
+												hist1_lower, nstats1, null_frac1, empty_frac1, 
+												mcv2_lower, mcvf2_lower, nstats2, 
+												hist2_lower, nstats2, null_frac2, empty_frac2, true);
+				break;
+
+			case OID_RANGE_GREATER_OP:
+				selec = 1 - calc_joint_lt_selectivity(typcache, 
+												mcv1_lower, mcvf1_lower, nstats1, 
+												hist1_lower, nstats1, null_frac1, empty_frac1, 
+												mcv2_lower, mcvf2_lower, nstats2, 
+												hist2_lower, nstats2, null_frac2, empty_frac2, false);
+				break;
+
+			case OID_RANGE_GREATER_EQUAL_OP:
+				selec = 1 - calc_joint_lt_selectivity(typcache, 
+												mcv1_lower, mcvf1_lower, nstats1, 
+												hist1_lower, nstats1, null_frac1, empty_frac1, 
+												mcv2_lower, mcvf2_lower, nstats2, 
+												hist2_lower, nstats2, null_frac2, empty_frac2, true);
+				break;
+
+			case OID_RANGE_LEFT_OP:
+				/* var1 << var2 when upper(var1) < lower(var2) */
+				selec = calc_joint_lt_selectivity(typcache, 
+												mcv1_upper, mcvf1_upper, nstats1, 
+												hist1_upper, nstats1, null_frac1, empty_frac1, 
+												mcv2_lower, mcvf2_lower, nstats2, 
+												hist2_lower, nstats2, null_frac2, empty_frac2, false);
+				break;
+
+			case OID_RANGE_RIGHT_OP:
+				/* var1 >> var2 when upper(var2) < lower(var1) */
+				selec = calc_joint_lt_selectivity(typcache,
+												mcv2_upper, mcvf2_upper, nstats2, 
+												hist2_upper, nstats2, null_frac2, empty_frac2, 
+												mcv1_lower, mcvf1_lower, nstats1, 
+												hist1_lower, nstats1, null_frac1, empty_frac2, false);
+				break;
+
+			case OID_RANGE_OVERLAPS_RIGHT_OP:
+				/* compare lower bounds */
+				selec = 1 - calc_joint_lt_selectivity(typcache, 
+												mcv1_lower, mcvf1_lower, nstats1, 
+												hist1_lower, nstats1, null_frac1, empty_frac1, 
+												mcv2_lower, mcvf2_lower, nstats2, 
+												hist2_lower, nstats2, null_frac2, empty_frac2, false);
+				break;
+
+			case OID_RANGE_OVERLAPS_LEFT_OP:
+				/* compare upper bounds */
+				selec = calc_joint_lt_selectivity(typcache, 
+												mcv1_upper, mcvf1_upper, nstats1, 
+												hist1_upper, nstats1, null_frac1, empty_frac1, 
+												mcv2_upper, mcvf2_upper, nstats2, 
+												hist2_upper, nstats2, null_frac2, empty_frac2, true);
+				break;
+			default:
+				break;
+		}
+	}
+
+	free_attstatsslot(&mcvstats1_lower);
+	free_attstatsslot(&mcvstats1_upper);
+	free_attstatsslot(&histstats1);
+	free_attstatsslot(&mcvstats2_lower);
+	free_attstatsslot(&mcvstats2_upper);
+	free_attstatsslot(&histstats2);
+	ReleaseVariableStats(vardata1);
+	ReleaseVariableStats(vardata2);
+
+	CLAMP_PROBABILITY(selec);
+
+	PG_RETURN_FLOAT8((float8) selec);
+}
+
+/*
  * rangesel -- restriction selectivity for range operators
  */
 Datum
