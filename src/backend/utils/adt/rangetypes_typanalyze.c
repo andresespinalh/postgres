@@ -191,7 +191,6 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	{
 		Datum	   *bound_hist_values;
 		Datum	   *length_hist_values;
-		Datum	   *mcv_lower_values;
 		int			pos,
 					posfrac,
 					delta,
@@ -339,48 +338,7 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 		stats->stakind[slot_idx] = STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM;
 		slot_idx++;
 
-		/*
-		 * Generate a lower bound mcv slot entry if there are at least two
-		 * values.
-		 */
-		if (non_empty_cnt >= 2)
-		{
-			/*
-			 * Ascending sort of values to count most common values
-			 */
-			qsort_arg(lowers, non_empty_cnt, sizeof(RangeBound),
-					  range_bound_qsort_cmp, typcache);
-
-			mcv_lower_values = (Datum *) palloc(num_bins * sizeof(Datum));
-
-			// TODO: Implement algorithm for counting most common values
-
-		}
-		else
-		{
-			/*
-			 * Even when we don't create the mcv, store an empty array
-			 * to mean "no mcv". We can't just leave stavalues NULL,
-			 * because get_attstatsslot() errors if you ask for stavalues, and
-			 * it's NULL. We'll still store the empty fraction in stanumbers.
-			 */
-			mcv_lower_values = palloc(0);
-			num_hist = 0;
-		}
-
-		stats->stavalues[slot_idx] = mcv_lower_values;
-		stats->numvalues[slot_idx] = num_bins;
-
-		// TODO: Store as RangeBound and not Range
-		/* Store ranges even if we're analyzing a multirange column */
-		stats->statypid[slot_idx] = typcache->type_id;
-		stats->statyplen[slot_idx] = typcache->typlen;
-		stats->statypbyval[slot_idx] = typcache->typbyval;
-		stats->statypalign[slot_idx] = typcache->typalign;
-
-		stats->stakind[slot_idx] = STATISTIC_KIND_LOWER_MCV;
-		slot_idx++;
-
+		// TODO: Implement lower bounds MCV
 		// TODO: Implement upper bounds MCV
 
 		MemoryContextSwitchTo(old_cxt);

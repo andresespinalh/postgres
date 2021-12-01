@@ -2968,6 +2968,10 @@ static Datum
 scalarineqjoinsel_wrapper(PG_FUNCTION_ARGS, bool isgt, bool iseq)
 {
 
+	// TODO: Implement scalarineqjoinsel_wrapper
+	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+
+#ifdef NOT_IMPLEMENTED
 	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
 	Oid			operator = PG_GETARG_OID(1);
 	List		*args = (List *) PG_GETARG_POINTER(2);
@@ -2978,17 +2982,6 @@ scalarineqjoinsel_wrapper(PG_FUNCTION_ARGS, bool isgt, bool iseq)
 	VariableStatData vardata2;
 	bool		reversed;
 	double		selec;
-
-	switch (operator)
-	{
-		case OID_RANGE_LEFT_OP:
-			// TODO: Convert from range to scalar ineq if it is a range operation (validate ranges first)
-			PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
-			break;		
-		default:
-			// TODO: Implement scalarineqjoinsel
-			PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
-	}
 
 	get_join_variables(root, args, sjinfo, &vardata1, &vardata2, &reversed);
 
@@ -3016,7 +3009,10 @@ scalarineqjoinsel_wrapper(PG_FUNCTION_ARGS, bool isgt, bool iseq)
 	ReleaseVariableStats(vardata2);
 
 	PG_RETURN_FLOAT8((float8) selec);
+#endif
+
 }
+
 /*
  *		scalarltjoinsel - Join selectivity of "<" for scalars
  */
