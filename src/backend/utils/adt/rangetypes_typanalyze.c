@@ -338,8 +338,10 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 		stats->stakind[slot_idx] = STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM;
 		slot_idx++;
 
-		// TODO: Implement lower bounds MCV
-		// TODO: Implement upper bounds MCV
+		// TODO: Implement bounds MCV (STATISTIC_KIND_BOUNDS_MCV)
+		// 	Values could be stored as ranges in stavalues (lower mcv in lower bounds and upper mcv in upper bounds)
+		// 	Frequencies could be stored in stanumbers (as an array with twice the number of values, lower half could 
+		//		be lower frequencies and upper half the upper frequencies)
 
 		MemoryContextSwitchTo(old_cxt);
 	}

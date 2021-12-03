@@ -30,6 +30,9 @@
 #include "utils/selfuncs.h"
 #include "utils/typcache.h"
 
+Datum rangejoinsel(PG_FUNCTION_ARGS);
+Datum rangesel(PG_FUNCTION_ARGS);
+
 static double default_range_selectivity(Oid operator);
 static double calc_mcv_selectivity_scalar(TypeCacheEntry *typcache, const RangeBound *value, 
 							const RangeBound *mcv, double *mcvf, int nmcv, 
@@ -230,8 +233,21 @@ histogram_lt_join_selectivity(TypeCacheEntry *typcache, const RangeBound *mcv1, 
 					const RangeBound *mcv2, double *mcvf2, int nmcv2, const RangeBound *hist2, int nhist2, 
 					double nullfrac2, double emptyfrac2, bool equal)
 {
-	// TODO: Implement this
-	return DEFAULT_INEQ_SEL;
+	int i;
+	
+	// ( Selectivity of (X < hist2[0]) + Selectivity of (X < hist2[nhist2-1]) ) / 2
+	double result = scalar_lt_selectivity(typcache, mcv1, mcvf1, nmcv1, hist1, nhist1, nullfrac1, emptyfrac1, &(hist2[0]), equal);
+	result += scalar_lt_selectivity(typcache, mcv1, mcvf1, nmcv1, hist1, nhist1, nullfrac1, emptyfrac1, &(hist2[nhist2-1]), equal);
+	result /= 2;
+
+	// sum of selectivity of (X < hist2[i]) for all other i
+	for(i = 1; i < nhist2 - 1; i++)
+		result += scalar_lt_selectivity(typcache, mcv1, mcvf1, nmcv1, hist1, nhist1, nullfrac1, emptyfrac1, &(hist2[i]), equal);
+	
+	// Divide by number of histogram buckets
+	result /= nhist2;
+
+	return result;
 }
 
 static double 
@@ -289,8 +305,8 @@ rangejoinsel(PG_FUNCTION_ARGS)
 	SpecialJoinInfo	*sjinfo = PG_GETARG_POINTER(4);
 	Oid			collation = PG_GET_COLLATION();
 	VariableStatData vardata1, vardata2;
-	AttStatsSlot mcvstats1_lower, mcvstats1_upper, histstats1;
-	AttStatsSlot mcvstats2_lower, mcvstats2_upper, histstats2;
+	AttStatsSlot mcvstats1, histstats1;
+	AttStatsSlot mcvstats2, histstats2;
 	bool		reversed;
 	Selectivity	selec;
 	TypeCacheEntry *typcache = NULL;
@@ -309,21 +325,15 @@ rangejoinsel(PG_FUNCTION_ARGS)
 	selec = default_range_selectivity(operator);
 
 	if (HeapTupleIsValid(vardata1.statsTuple) &&
-		get_attstatsslot(&mcvstats1_lower, vardata1.statsTuple,
-						 STATISTIC_KIND_BOUNDS_MCV_LOWER, InvalidOid,
-						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
-		get_attstatsslot(&mcvstats1_upper, vardata1.statsTuple,
-						 STATISTIC_KIND_BOUNDS_MCV_UPPER, InvalidOid,
+		get_attstatsslot(&mcvstats1, vardata1.statsTuple,
+						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
 						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
 		get_attstatsslot(&histstats1, vardata1.statsTuple,
 						 STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
 						 ATTSTATSSLOT_VALUES) &&
 		HeapTupleIsValid(vardata2.statsTuple) &&
-		get_attstatsslot(&mcvstats2_lower, vardata2.statsTuple,
-						 STATISTIC_KIND_BOUNDS_MCV_LOWER, InvalidOid,
-						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
-		get_attstatsslot(&mcvstats2_upper, vardata2.statsTuple,
-						 STATISTIC_KIND_BOUNDS_MCV_UPPER, InvalidOid,
+		get_attstatsslot(&mcvstats2, vardata2.statsTuple,
+						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
 						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
 		get_attstatsslot(&histstats2, vardata2.statsTuple,
 						 STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
@@ -505,16 +515,16 @@ rangejoinsel(PG_FUNCTION_ARGS)
 		}
 	}
 
-	free_attstatsslot(&mcvstats1_lower);
-	free_attstatsslot(&mcvstats1_upper);
+	free_attstatsslot(&mcvstats1);
 	free_attstatsslot(&histstats1);
-	free_attstatsslot(&mcvstats2_lower);
-	free_attstatsslot(&mcvstats2_upper);
+	free_attstatsslot(&mcvstats2);
 	free_attstatsslot(&histstats2);
 	ReleaseVariableStats(vardata1);
 	ReleaseVariableStats(vardata2);
 
 	CLAMP_PROBABILITY(selec);
+
+	fprintf(stdin, "Selectivity: %f\n", selec);
 
 	PG_RETURN_FLOAT8((float8) selec);
 }
