@@ -325,20 +325,27 @@ rangejoinsel(PG_FUNCTION_ARGS)
 	selec = default_range_selectivity(operator);
 
 	if (HeapTupleIsValid(vardata1.statsTuple) &&
+		/* TODO: Un-comment this
 		get_attstatsslot(&mcvstats1, vardata1.statsTuple,
 						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
 						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
+		*/
 		get_attstatsslot(&histstats1, vardata1.statsTuple,
 						 STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
 						 ATTSTATSSLOT_VALUES) &&
 		HeapTupleIsValid(vardata2.statsTuple) &&
+		/* TODO: Un-comment this
 		get_attstatsslot(&mcvstats2, vardata2.statsTuple,
 						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
 						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
+		*/
 		get_attstatsslot(&histstats2, vardata2.statsTuple,
 						 STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
 						 ATTSTATSSLOT_VALUES) &&
 		vardata1.vartype == vardata2.vartype){
+
+		// Initialize type cache
+		typcache = range_get_typcache(fcinfo, vardata1.vartype);
 
 		/*
 		* First look up the fraction of NULLs and empty ranges from pg_statistic.
@@ -429,7 +436,6 @@ rangejoinsel(PG_FUNCTION_ARGS)
 		mcv2_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv2);
 		mcvf2_upper = (double *) palloc(sizeof(double) * nmcv2);
 
-		typcache = range_get_typcache(fcinfo, vardata1.vartype);
 		switch(operator) {
 			case OID_RANGE_OVERLAP_OP:
 				/* 
@@ -513,18 +519,21 @@ rangejoinsel(PG_FUNCTION_ARGS)
 			default:
 				break;
 		}
+
+		// TODO: free_attstatsslot(&mcvstats1);
+		free_attstatsslot(&histstats1);
+		// TODO: free_attstatsslot(&mcvstats2);
+		free_attstatsslot(&histstats2);
+
 	}
 
-	free_attstatsslot(&mcvstats1);
-	free_attstatsslot(&histstats1);
-	free_attstatsslot(&mcvstats2);
-	free_attstatsslot(&histstats2);
 	ReleaseVariableStats(vardata1);
 	ReleaseVariableStats(vardata2);
 
 	CLAMP_PROBABILITY(selec);
 
-	fprintf(stdin, "Selectivity: %f\n", selec);
+	fprintf(stdout, "Selectivity: %f\n", selec);
+    fflush(stdout);
 
 	PG_RETURN_FLOAT8((float8) selec);
 }
@@ -763,7 +772,7 @@ calc_rangesel(TypeCacheEntry *typcache, VariableStatData *vardata,
 		if (hist_selec < 0.0)
 			hist_selec = default_range_selectivity(operator);
 
-		hist_selec = calc_mcv_selectivity(typcache, vardata, constval, operator, &sumcommon);
+		mcv_selec = calc_mcv_selectivity(typcache, vardata, constval, operator, &sumcommon);
 
 		/*
 		 * Now merge the results for the empty ranges and histogram

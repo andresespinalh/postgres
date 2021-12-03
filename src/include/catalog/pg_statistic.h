@@ -270,6 +270,18 @@ typedef FormData_pg_statistic *Form_pg_statistic;
  */
 #define STATISTIC_KIND_BOUNDS_HISTOGRAM  7
 
+/*
+ * A "bounds MCV" slot is similar to STATISTIC_KIND_MCV, but for a range-type column.
+ * stavalues contains M range values that represent the most common values for the 
+ * lower and upper boundaries. Unlike a regular scalar MCV, this is actually two 
+ * MCVs combined into a single array, with the lower bounds of each value forming the
+ * MCV of lower bounds, and the upper bounds the MCV of upper bounds.
+ * stanumbers contains 2*M values, the first M values are the frequencies for the lower
+ * bounds' MCV and the last M values are the frequencies for the upper bounds' MCV.
+ * Only non-NULL, non-empty ranges are included.
+ */
+#define STATISTIC_KIND_BOUNDS_MCV  8
+
 #endif							/* EXPOSE_TO_CLIENT_CODE */
 
 #endif							/* PG_STATISTIC_H */
