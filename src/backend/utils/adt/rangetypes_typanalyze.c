@@ -343,7 +343,7 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 		// 	Frequencies could be stored in stanumbers (as an array with twice the number of values, lower half could 
 		//		be lower frequencies and upper half the upper frequencies)
 
-		// TODO: Remove MCV from histogram values (maybe calculate MCV before calculating histograms)
+		// TODO: Remove MCV from histogram values (calculate MCV before calculating histograms and remove values from uppers and lowers)
 
 		MemoryContextSwitchTo(old_cxt);
 	}

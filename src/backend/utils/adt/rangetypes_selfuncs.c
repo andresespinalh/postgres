@@ -325,20 +325,16 @@ rangejoinsel(PG_FUNCTION_ARGS)
 	selec = default_range_selectivity(operator);
 
 	if (HeapTupleIsValid(vardata1.statsTuple) &&
-		/* TODO: Un-comment this
 		get_attstatsslot(&mcvstats1, vardata1.statsTuple,
 						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
 						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
-		*/
 		get_attstatsslot(&histstats1, vardata1.statsTuple,
 						 STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
 						 ATTSTATSSLOT_VALUES) &&
 		HeapTupleIsValid(vardata2.statsTuple) &&
-		/* TODO: Un-comment this
 		get_attstatsslot(&mcvstats2, vardata2.statsTuple,
 						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
 						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
-		*/
 		get_attstatsslot(&histstats2, vardata2.statsTuple,
 						 STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
 						 ATTSTATSSLOT_VALUES) &&
@@ -520,9 +516,9 @@ rangejoinsel(PG_FUNCTION_ARGS)
 				break;
 		}
 
-		// TODO: free_attstatsslot(&mcvstats1);
+		free_attstatsslot(&mcvstats1);
 		free_attstatsslot(&histstats1);
-		// TODO: free_attstatsslot(&mcvstats2);
+		free_attstatsslot(&mcvstats2);
 		free_attstatsslot(&histstats2);
 
 	}
@@ -532,7 +528,7 @@ rangejoinsel(PG_FUNCTION_ARGS)
 
 	CLAMP_PROBABILITY(selec);
 
-	fprintf(stdout, "Selectivity: %f\n", selec);
+	fprintf(stdout, "Join selectivity: %f\n", selec);
     fflush(stdout);
 
 	PG_RETURN_FLOAT8((float8) selec);
@@ -807,8 +803,131 @@ static double
 calc_mcv_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 					  const RangeType *constval, Oid operator, double *sumcommon)
 {
-	// TODO: Implement this
-	return default_range_selectivity(operator);
+
+	AttStatsSlot mcvstats;
+	int			nmcv;
+	double	   *mcvf_lower;
+	double	   *mcvf_upper;
+	RangeBound *mcv_lower;
+	RangeBound *mcv_upper;
+	int			i;
+	RangeBound	const_lower;
+	RangeBound	const_upper;
+	bool		empty;
+	double		mcv_selec;
+
+	/* Can't use the mcv with insecure range support functions */
+	if (!statistic_proc_security_check(vardata,
+									   typcache->rng_cmp_proc_finfo.fn_oid))
+		return -1;
+	if (OidIsValid(typcache->rng_subdiff_finfo.fn_oid) &&
+		!statistic_proc_security_check(vardata,
+									   typcache->rng_subdiff_finfo.fn_oid))
+		return -1;
+
+	/* Try to get mcv of ranges */
+	if (HeapTupleIsValid(vardata->statsTuple) &&
+		get_attstatsslot(&mcvstats, vardata->statsTuple,
+						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)) {
+		
+		// TODO: How to extract mcv statistics?
+		nmcv = 0;
+		mcv_lower = (RangeBound *) palloc(sizeof(RangeBound) * nmcv);
+		mcvf_lower = (double *) palloc(sizeof(double) * nmcv);
+		mcv_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv);
+		mcvf_upper = (double *) palloc(sizeof(double) * nmcv);
+
+		/* Extract the bounds of the constant value. */
+		range_deserialize(typcache, constval, &const_lower, &const_upper, &empty);
+		Assert(!empty);
+
+		/*
+		* Calculate selectivity comparing the lower or upper bound of the
+		* constant with the mcv of lower or upper bounds.
+		*/
+		switch (operator)
+		{
+			case OID_RANGE_LESS_OP:
+				/*
+				* The regular b-tree comparison operators (<, <=, >, >=) compare
+				* the lower bounds first, and the upper bounds for values with
+				* equal lower bounds. Estimate that by comparing the lower bounds
+				* only. This gives a fairly accurate estimate assuming there
+				* aren't many rows with a lower bound equal to the constant's
+				* lower bound.
+				*/
+				mcv_selec = calc_mcv_selectivity_scalar(typcache, &const_lower, 
+								mcv_lower, mcvf_lower, nmcv, false, sumcommon);
+				break;
+
+			case OID_RANGE_LESS_EQUAL_OP:
+				mcv_selec = calc_mcv_selectivity_scalar(typcache, &const_lower, 
+								mcv_lower, mcvf_lower, nmcv, true, sumcommon);
+				break;
+
+			case OID_RANGE_GREATER_OP:
+				mcv_selec = 1 - calc_mcv_selectivity_scalar(typcache, &const_lower, 
+								mcv_lower, mcvf_lower, nmcv, true, sumcommon);
+				break;
+
+			case OID_RANGE_GREATER_EQUAL_OP:
+				mcv_selec = 1 - calc_mcv_selectivity_scalar(typcache, &const_lower, 
+								mcv_lower, mcvf_lower, nmcv, false, sumcommon);
+				break;
+
+			case OID_RANGE_LEFT_OP:
+				/* var << const when upper(var) < lower(const) */
+				mcv_selec = calc_mcv_selectivity_scalar(typcache, &const_lower, 
+								mcv_upper, mcvf_upper, nmcv, false, sumcommon);
+				break;
+
+			case OID_RANGE_RIGHT_OP:
+				/* var >> const when lower(var) > upper(const) */
+				mcv_selec = 1 - calc_mcv_selectivity_scalar(typcache, &const_upper, 
+								mcv_lower, mcvf_lower, nmcv, true, sumcommon);
+				break;
+
+			case OID_RANGE_OVERLAPS_RIGHT_OP:
+				/* compare lower bounds */
+				mcv_selec = 1 - calc_mcv_selectivity_scalar(typcache, &const_lower, 
+								mcv_lower, mcvf_lower, nmcv, false, sumcommon);
+				break;
+
+			case OID_RANGE_OVERLAPS_LEFT_OP:
+				/* compare upper bounds */
+				mcv_selec = calc_mcv_selectivity_scalar(typcache, &const_upper, 
+								mcv_upper, mcvf_upper, nmcv, true, sumcommon);
+				break;
+
+			case OID_RANGE_OVERLAP_OP:
+			case OID_RANGE_CONTAINS_ELEM_OP:
+
+				/*
+				* A && B <=> NOT (A << B OR A >> B).
+				*
+				* Since A << B and A >> B are mutually exclusive events we can
+				* sum their probabilities to find probability of (A << B OR A >>
+				* B).
+				*
+				* "range @> elem" is equivalent to "range && [elem,elem]". The
+				* caller already constructed the singular range from the element
+				* constant, so just treat it the same as &&.
+				*/
+				mcv_selec = calc_mcv_selectivity_scalar(typcache, &const_lower, 
+								mcv_upper, mcvf_upper, nmcv, false, sumcommon);
+				mcv_selec += 1 - calc_mcv_selectivity_scalar(typcache, &const_upper, 
+								mcv_lower, mcvf_lower, nmcv, true, sumcommon);
+				mcv_selec = 1.0 - mcv_selec;
+				break;
+		}
+	} else {
+		mcv_selec = default_range_selectivity(operator);
+		*sumcommon = 0;
+	}
+
+	return mcv_selec;
+	
 }
 
 /*
