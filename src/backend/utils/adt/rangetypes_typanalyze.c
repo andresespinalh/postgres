@@ -91,6 +91,120 @@ range_bound_qsort_cmp(const void *a1, const void *a2, void *arg)
 }
 
 /*
+ * min_freq -- auxiliar struc to return the value and position of the mininum frequency of an array (auxiliary function for MCV)
+ */
+typedef struct {
+	int freq;
+	int pos;
+} min_freq;
+
+/*
+ * update_min_freq() -- update the mininum frequency of an array (auxiliary function for MCV)
+ */
+min_freq update_min_freq(int *a, int size) {
+	int i;
+	min_freq mf;
+	
+	mf.freq = a[0];
+	mf.pos = 0;
+
+	for (i = 1; i < size; i++) {
+		if (mf.freq > a[i]) {
+			mf.freq = a[i];
+			mf.pos = i;
+		}  
+	}
+
+	printf("update min_freq: %d\n", mf.freq);
+
+	return mf;
+}
+
+// void print_current_state(int *a, int a_size, int *mcv, int mcv_size, int *mcv_freqs, int mcv_freqs_size, int challenger, int ch_freq, int cur_size, int max_size, int i, min_freq mf) {
+// 	printf("----------------------------------\n");
+// 	printf("#%d ", i);
+// 	printf("a:\t\t[ ");
+// 	for(int i = 0; i < a_size; i++)
+// 		printf("%d ", a[i]);
+// 	printf("] \n");
+
+// 	printf("challenger: %d\t", challenger);
+// 	printf("ch_freq: %d\n", ch_freq);
+// 	printf("min_freq: %d min_freq_pos %d\n", mf.freq, mf.pos);
+	
+// 	printf("mcv:\t\t[ ");
+// 	for(int i = 0; i < mcv_size; i++)
+// 		printf("%d ", mcv[i]);
+// 	printf("] \n");
+
+// 	printf("mcv_freqs:\t[ ");
+// 	for(int i = 0; i < mcv_freqs_size; i++)
+// 		printf("%d ", mcv_freqs[i]);
+// 	printf("] \n");
+
+// 	printf("cur_size: %d\t", cur_size);
+// 	printf("max_size: %d\n", max_size);
+// 	printf("----------------------------------\n");
+// }
+
+/*
+ * insert_challenger() -- insert a value into the MCV array (auxiliary function for MCV)
+ */
+void insert_challenger(int ch_freq, min_freq *mf, int *cur_size, int max_size, int challenger, int *mcv, int *mcv_freqs) {
+
+	if (*cur_size < max_size) { // there is space in the array
+		printf("inserting challenger to mcv %d\n", challenger);
+		
+		mcv[(*cur_size)] = challenger;
+		mcv_freqs[(*cur_size)] = ch_freq;
+		(*cur_size)++;
+
+		printf("cur_size: %d\n", *cur_size);
+	}
+	else if (ch_freq > mf->freq) { //no more space left
+		printf("inserting challenger to mcv replacing someone %d\n", challenger);
+		mcv[mf->pos] = challenger;
+		mcv_freqs[mf->pos] = ch_freq;
+		printf("mfpos: %d\n", mf->pos);
+	}
+
+	*mf = update_min_freq(mcv_freqs, (*cur_size));
+}
+
+/*
+ * calculate_most_common_values_from_array() -- calculate MCV
+ */
+void calculate_most_common_values_from_array(int *a, int a_size, int max_size, int *cur_size, int *mcv, int *mcv_freqs) {
+	min_freq mf;
+	int challenger;
+	int ch_freq;
+
+	mf.freq = 0;
+	mf.pos = 0;
+
+	challenger = a[0];
+	ch_freq = 0;
+
+	for (int i = 0; i < a_size; i++) {
+		if (a[i] != challenger) {
+			// new challenger found. insert old challenger if needed.
+			insert_challenger(ch_freq, &mf, cur_size, max_size, challenger, mcv, mcv_freqs);
+
+			// update to new challenger
+			ch_freq = 1;
+			challenger = a[i];
+		} else {
+			ch_freq++;
+			printf("old challenger: %d freq: %d\n", a[i], ch_freq);
+		}
+		// print_current_state(a, a_size, mcv, (*cur_size), mcv_freqs, (*cur_size), challenger, ch_freq, (*cur_size), max_size, i, mf);
+	}
+	
+	insert_challenger(ch_freq, &mf, cur_size, max_size, challenger, mcv, mcv_freqs);
+	// print_current_state(a, a_size, mcv, (*cur_size), mcv_freqs, (*cur_size), challenger, ch_freq, (*cur_size), max_size, a_size, mf);
+}
+
+/*
  * compute_range_stats() -- compute statistics for a range column
  */
 static void
@@ -344,6 +458,17 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 		//		be lower frequencies and upper half the upper frequencies)
 
 		// TODO: Remove MCV from histogram values (maybe calculate MCV before calculating histograms)
+
+		int a[12] = {1, 2, 2, 2, 3, 5, 5, 5, 5, 7, 7, 7}; //input array
+		int a_size = 12; //input array size
+
+		int max_size = 3; //possible maximum size of mcv array
+		int cur_size = 0; //maximum size of mcv array in the end
+
+		int *mcv = (int *) calloc(max_size, sizeof(int));
+		int *mcv_freqs = (int *) calloc(max_size, sizeof(int));
+
+		calculate_most_common_values_from_array(a, a_size, max_size, &cur_size, mcv, mcv_freqs);
 
 		MemoryContextSwitchTo(old_cxt);
 	}
