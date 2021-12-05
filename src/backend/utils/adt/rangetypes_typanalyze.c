@@ -31,10 +31,27 @@
 #include "utils/lsyscache.h"
 #include "utils/rangetypes.h"
 
+/*
+ * min_freq -- auxiliar struct to return the value and position of the mininum frequency of an array (auxiliary function for MCV)
+ */
+typedef struct {
+	int freq;
+	int pos;
+} min_freq;
+
 static int	float8_qsort_cmp(const void *a1, const void *a2);
 static int	range_bound_qsort_cmp(const void *a1, const void *a2, void *arg);
 static void compute_range_stats(VacAttrStats *stats,
 								AnalyzeAttrFetchFunc fetchfunc, int samplerows, double totalrows);
+
+// TODO: Remove mcv values from histogram
+int remove_occurences(TypeCacheEntry *typcache, RangeBound *arr, int a_size, const RangeBound value_to_remove){
+	int i, total_elements = 0;
+	for (i = 0; i < a_size; i++)
+		if (range_cmp_bounds(typcache, &arr[i], &value_to_remove) != 0)
+			arr[total_elements++] = arr[i];
+	return total_elements;
+}
 
 /*
  * range_typanalyze -- typanalyze function for range columns
@@ -91,81 +108,44 @@ range_bound_qsort_cmp(const void *a1, const void *a2, void *arg)
 }
 
 /*
- * min_freq -- auxiliar struc to return the value and position of the mininum frequency of an array (auxiliary function for MCV)
- */
-typedef struct {
-	int freq;
-	int pos;
-} min_freq;
-
-/*
  * update_min_freq() -- update the mininum frequency of an array (auxiliary function for MCV)
  */
-min_freq update_min_freq(int *a, int size) {
+min_freq update_min_freq(int *mcv_freqs, int size) {
 	int i;
 	min_freq mf;
 	
-	mf.freq = a[0];
+	mf.freq = mcv_freqs[0];
 	mf.pos = 0;
 
 	for (i = 1; i < size; i++) {
-		if (mf.freq > a[i]) {
-			mf.freq = a[i];
+		if (mf.freq > mcv_freqs[i]) {
+			mf.freq = mcv_freqs[i];
 			mf.pos = i;
-		}  
+		}
 	}
-
-	printf("update min_freq: %d\n", mf.freq);
 
 	return mf;
 }
 
-// void print_current_state(int *a, int a_size, int *mcv, int mcv_size, int *mcv_freqs, int mcv_freqs_size, int challenger, int ch_freq, int cur_size, int max_size, int i, min_freq mf) {
-// 	printf("----------------------------------\n");
-// 	printf("#%d ", i);
-// 	printf("a:\t\t[ ");
-// 	for(int i = 0; i < a_size; i++)
-// 		printf("%d ", a[i]);
-// 	printf("] \n");
-
-// 	printf("challenger: %d\t", challenger);
-// 	printf("ch_freq: %d\n", ch_freq);
-// 	printf("min_freq: %d min_freq_pos %d\n", mf.freq, mf.pos);
-	
-// 	printf("mcv:\t\t[ ");
-// 	for(int i = 0; i < mcv_size; i++)
-// 		printf("%d ", mcv[i]);
-// 	printf("] \n");
-
-// 	printf("mcv_freqs:\t[ ");
-// 	for(int i = 0; i < mcv_freqs_size; i++)
-// 		printf("%d ", mcv_freqs[i]);
-// 	printf("] \n");
-
-// 	printf("cur_size: %d\t", cur_size);
-// 	printf("max_size: %d\n", max_size);
-// 	printf("----------------------------------\n");
-// }
-
 /*
  * insert_challenger() -- insert a value into the MCV array (auxiliary function for MCV)
  */
-void insert_challenger(int ch_freq, min_freq *mf, int *cur_size, int max_size, int challenger, int *mcv, int *mcv_freqs) {
+void insert_challenger(int ch_freq, min_freq *mf, int *cur_size, int max_size, RangeBound challenger, RangeBound *mcv, int *mcv_freqs) {
 
-	if (*cur_size < max_size) { // there is space in the array
-		printf("inserting challenger to mcv %d\n", challenger);
+	// there is space in the array
+	if (*cur_size < max_size) { 
 		
 		mcv[(*cur_size)] = challenger;
 		mcv_freqs[(*cur_size)] = ch_freq;
 		(*cur_size)++;
-
-		printf("cur_size: %d\n", *cur_size);
+		
 	}
-	else if (ch_freq > mf->freq) { //no more space left
-		printf("inserting challenger to mcv replacing someone %d\n", challenger);
+	//no more space left
+	else if (ch_freq > mf->freq) { 
+
 		mcv[mf->pos] = challenger;
 		mcv_freqs[mf->pos] = ch_freq;
-		printf("mfpos: %d\n", mf->pos);
+		
 	}
 
 	*mf = update_min_freq(mcv_freqs, (*cur_size));
@@ -174,10 +154,12 @@ void insert_challenger(int ch_freq, min_freq *mf, int *cur_size, int max_size, i
 /*
  * calculate_most_common_values_from_array() -- calculate MCV
  */
-void calculate_most_common_values_from_array(int *a, int a_size, int max_size, int *cur_size, int *mcv, int *mcv_freqs) {
+void calculate_most_common_values_from_array(TypeCacheEntry *typcache, RangeBound *a, int a_size, int max_size, int *cur_size, RangeBound *mcv, float4 *mcv_fracs) {
 	min_freq mf;
-	int challenger;
+	RangeBound challenger;
 	int ch_freq;
+	int *mcv_freqs;
+	int i;
 
 	mf.freq = 0;
 	mf.pos = 0;
@@ -186,22 +168,31 @@ void calculate_most_common_values_from_array(int *a, int a_size, int max_size, i
 	ch_freq = 0;
 
 	for (int i = 0; i < a_size; i++) {
-		if (a[i] != challenger) {
+
+		if (range_cmp_bounds(typcache, &a[i], &challenger) != 0) {
+
 			// new challenger found. insert old challenger if needed.
 			insert_challenger(ch_freq, &mf, cur_size, max_size, challenger, mcv, mcv_freqs);
 
 			// update to new challenger
 			ch_freq = 1;
 			challenger = a[i];
-		} else {
+
+		} else
 			ch_freq++;
-			printf("old challenger: %d freq: %d\n", a[i], ch_freq);
-		}
-		// print_current_state(a, a_size, mcv, (*cur_size), mcv_freqs, (*cur_size), challenger, ch_freq, (*cur_size), max_size, i, mf);
+
 	}
 	
 	insert_challenger(ch_freq, &mf, cur_size, max_size, challenger, mcv, mcv_freqs);
-	// print_current_state(a, a_size, mcv, (*cur_size), mcv_freqs, (*cur_size), challenger, ch_freq, (*cur_size), max_size, a_size, mf);
+
+	// Calculate fractions
+	for (i = 0; i < cur_size; i++)
+		mcv_fracs[i] = mcv_freqs[i] / a_size;
+
+	// Fill remaining slots with zeros
+	for (; i < max_size; i++)
+		mcv_fracs[i] = 0;
+
 }
 
 /*
@@ -217,10 +208,11 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	int			non_null_cnt = 0;
 	int			non_empty_cnt = 0;
 	int			empty_cnt = 0;
+	int 		hist_cnt;
 	int			range_no;
 	int			slot_idx;
 	int			num_bins = stats->attr->attstattarget;
-	int			num_hist;
+	int			num_hist, num_mcv;
 	float8	   *lengths;
 	RangeBound *lowers,
 			   *uppers;
@@ -303,8 +295,14 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	/* We can only compute real stats if we found some non-null values. */
 	if (non_null_cnt > 0)
 	{
+		float4	   *bound_mcv_freqs;
+		Datum	   *bound_mcv_values;
 		Datum	   *bound_hist_values;
 		Datum	   *length_hist_values;
+		RangeBound *lower_mcv_values;
+		RangeBound *upper_mcv_values;
+		int 		lower_mcv_count, 
+					upper_mcv_count;
 		int			pos,
 					posfrac,
 					delta,
@@ -325,8 +323,10 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 		old_cxt = MemoryContextSwitchTo(stats->anl_context);
 
 		/*
-		 * Generate a bounds histogram slot entry if there are at least two
-		 * values.
+		 * Generate a bounds mcv slot entry if there are at least two values.
+		 * Most common values are stored as ranges in stavalues (lower mcv in lower bounds and upper mcv in upper bounds)
+		 * Frequencies are stored in stanumbers (as an array with twice the number of values, 
+		 * 	the lower half corresponds to lower frequencies and upper half the upper frequencies)
 		 */
 		if (non_empty_cnt >= 2)
 		{
@@ -335,6 +335,63 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 					  range_bound_qsort_cmp, typcache);
 			qsort_arg(uppers, non_empty_cnt, sizeof(RangeBound),
 					  range_bound_qsort_cmp, typcache);
+
+			num_mcv = non_empty_cnt;
+			if (num_mcv > num_bins)
+				num_mcv = num_bins + 1;
+
+			bound_mcv_freqs = (float4 *) palloc(2 * num_mcv * sizeof(float4));
+			lower_mcv_values = (RangeBound *) palloc(num_mcv * sizeof(RangeBound));
+			upper_mcv_values = (RangeBound *) palloc(num_mcv * sizeof(RangeBound));
+
+			calculate_most_common_values_from_array(typcache, lowers, non_empty_cnt, num_mcv, 
+												&lower_mcv_count, lower_mcv_values, bound_mcv_freqs);
+			calculate_most_common_values_from_array(typcache, uppers, non_empty_cnt, num_mcv, 
+												&upper_mcv_count, upper_mcv_values, bound_mcv_freqs + num_mcv);
+
+			bound_mcv_values = (Datum *) palloc(num_mcv * sizeof(Datum));
+			for (i = 0; i < num_mcv; i++)
+			{
+
+				RangeBound	lower,
+							upper;
+
+				lower.val = NULL;
+				lower.inclusive = false;
+				lower.infinite = false;
+				lower.lower = true;
+
+				upper.val = NULL;
+				upper.inclusive = false;
+				upper.infinite = false;
+				upper.lower = false;
+				
+				if(i < lower_mcv_count)
+					lower = lower_mcv_values[i];
+				
+				if(i < upper_mcv_count)
+					upper = upper_mcv_values[i];
+
+				bound_mcv_values[i] = PointerGetDatum(range_serialize(
+					typcache, &lower, &upper, false));
+
+			}
+			
+			stats->stakind[slot_idx] = STATISTIC_KIND_BOUNDS_MCV;
+			stats->stavalues[slot_idx] = bound_mcv_values;
+			stats->numvalues[slot_idx] = num_mcv;
+			stats->stanumbers[slot_idx] = bound_mcv_freqs;
+			stats->numnumbers[slot_idx] = 2 * num_mcv;
+			slot_idx++;
+
+		}
+
+		/*
+		 * Generate a bounds histogram slot entry if there are at least two
+		 * values.
+		 */
+		if (non_empty_cnt >= 2)
+		{
 
 			num_hist = non_empty_cnt;
 			if (num_hist > num_bins)
@@ -451,25 +508,7 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 
 		stats->stakind[slot_idx] = STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM;
 		slot_idx++;
-
-		// TODO: Implement bounds MCV (STATISTIC_KIND_BOUNDS_MCV)
-		// 	Values could be stored as ranges in stavalues (lower mcv in lower bounds and upper mcv in upper bounds)
-		// 	Frequencies could be stored in stanumbers (as an array with twice the number of values, lower half could 
-		//		be lower frequencies and upper half the upper frequencies)
-
-		// TODO: Remove MCV from histogram values (calculate MCV before calculating histograms and remove values from uppers and lowers)
-
-		int a[12] = {1, 2, 2, 2, 3, 5, 5, 5, 5, 7, 7, 7}; //input array
-		int a_size = 12; //input array size
-
-		int max_size = 3; //possible maximum size of mcv array
-		int cur_size = 0; //maximum size of mcv array in the end
-
-		int *mcv = (int *) calloc(max_size, sizeof(int));
-		int *mcv_freqs = (int *) calloc(max_size, sizeof(int));
-
-		calculate_most_common_values_from_array(a, a_size, max_size, &cur_size, mcv, mcv_freqs);
-
+		
 		MemoryContextSwitchTo(old_cxt);
 	}
 	else if (null_cnt > 0)

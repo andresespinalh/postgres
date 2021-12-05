@@ -402,12 +402,27 @@ rangejoinsel(PG_FUNCTION_ARGS)
 				elog(ERROR, "bounds histogram contains an empty range");
 		}
 
-		// TODO: How to extract mcv statistics?
-		nmcv1 = 0;
+		nmcv1 = mcvstats1.nvalues;
 		mcv1_lower = (RangeBound *) palloc(sizeof(RangeBound) * nmcv1);
 		mcvf1_lower = (double *) palloc(sizeof(double) * nmcv1);
 		mcv1_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv1);
 		mcvf1_upper = (double *) palloc(sizeof(double) * nmcv1);
+		for (i = 0; i < nmcv1; i++)
+		{
+			range_deserialize(typcache, DatumGetRangeTypeP(mcvstats1.values[i]),
+							&mcv1_lower[i], &mcv1_upper[i], &empty);
+
+			/* The mcv should not contain any empty ranges */
+			if (empty)
+				elog(ERROR, "bounds mcv contains an empty range");
+
+			/* The mcv frequencies should be twice the values (upper + lower) */
+			if (2 * mcvstats1.nvalues != mcvstats1.nnumbers)
+				elog(ERROR, "bounds mcv values and frequencies don't match");
+
+			mcvf1_lower[i] = mcvstats1.numbers[i];
+			mcvf1_upper[i] = mcvstats1.numbers[mcvstats1.nvalues + i];
+		}
 
 		/*
 		* Convert histograms of ranges into histograms of their lower and upper
@@ -425,12 +440,27 @@ rangejoinsel(PG_FUNCTION_ARGS)
 				elog(ERROR, "bounds histogram contains an empty range");
 		}
 
-		// TODO: How to extract mcv statistics?
-		nmcv2 = 0;
+		nmcv2 = mcvstats2.nvalues;
 		mcv2_lower = (RangeBound *) palloc(sizeof(RangeBound) * nmcv2);
 		mcvf2_lower = (double *) palloc(sizeof(double) * nmcv2);
 		mcv2_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv2);
 		mcvf2_upper = (double *) palloc(sizeof(double) * nmcv2);
+		for (i = 0; i < nmcv2; i++)
+		{
+			range_deserialize(typcache, DatumGetRangeTypeP(mcvstats2.values[i]),
+							&mcv2_lower[i], &mcv2_upper[i], &empty);
+
+			/* The mcv should not contain any empty ranges */
+			if (empty)
+				elog(ERROR, "bounds mcv contains an empty range");
+
+			/* The mcv frequencies should be twice the values (upper + lower) */
+			if (2 * mcvstats2.nvalues != mcvstats2.nnumbers)
+				elog(ERROR, "bounds mcv values and frequencies don't match");
+
+			mcvf2_lower[i] = mcvstats2.numbers[i];
+			mcvf2_upper[i] = mcvstats2.numbers[mcvstats2.nvalues + i];
+		}
 
 		switch(operator) {
 			case OID_RANGE_OVERLAP_OP:
@@ -831,12 +861,28 @@ calc_mcv_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
 						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)) {
 		
-		// TODO: How to extract mcv statistics?
-		nmcv = 0;
+
+		nmcv = mcvstats.nvalues;
 		mcv_lower = (RangeBound *) palloc(sizeof(RangeBound) * nmcv);
 		mcvf_lower = (double *) palloc(sizeof(double) * nmcv);
 		mcv_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv);
 		mcvf_upper = (double *) palloc(sizeof(double) * nmcv);
+		for (i = 0; i < nmcv; i++)
+		{
+			range_deserialize(typcache, DatumGetRangeTypeP(mcvstats.values[i]),
+							&mcv_lower[i], &mcv_upper[i], &empty);
+
+			/* The mcv should not contain any empty ranges */
+			if (empty)
+				elog(ERROR, "bounds mcv contains an empty range");
+
+			/* The mcv frequencies should be twice the values (upper + lower) */
+			if (2 * mcvstats.nvalues != mcvstats.nnumbers)
+				elog(ERROR, "bounds mcv values and frequencies don't match");
+
+			mcvf_lower[i] = mcvstats.numbers[i];
+			mcvf_upper[i] = mcvstats.numbers[mcvstats.nvalues + i];
+		}
 
 		/* Extract the bounds of the constant value. */
 		range_deserialize(typcache, constval, &const_lower, &const_upper, &empty);
