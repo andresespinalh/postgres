@@ -43,6 +43,13 @@ static int	float8_qsort_cmp(const void *a1, const void *a2);
 static int	range_bound_qsort_cmp(const void *a1, const void *a2, void *arg);
 static void compute_range_stats(VacAttrStats *stats,
 								AnalyzeAttrFetchFunc fetchfunc, int samplerows, double totalrows);
+int remove_occurences(TypeCacheEntry *typcache, RangeBound *arr, int a_size, 
+								const RangeBound value_to_remove);
+min_freq update_min_freq(int *mcv_freqs, int size);
+ void insert_challenger(int ch_freq, min_freq *mf, int *cur_size, int max_size, 
+ 								RangeBound challenger, RangeBound *mcv, int *mcv_freqs);
+void calculate_most_common_values_from_array(TypeCacheEntry *typcache, RangeBound *a, int a_size, 
+								int max_size, int *cur_size, RangeBound *mcv, float4 *mcv_fracs);
 
 // TODO: Remove mcv values from histogram
 int remove_occurences(TypeCacheEntry *typcache, RangeBound *arr, int a_size, const RangeBound value_to_remove){
@@ -166,6 +173,8 @@ void calculate_most_common_values_from_array(TypeCacheEntry *typcache, RangeBoun
 
 	challenger = a[0];
 	ch_freq = 0;
+	*cur_size = 0;
+	mcv_freqs = (int *) palloc(sizeof(int) * max_size);
 
 	for (int i = 0; i < a_size; i++) {
 
@@ -186,7 +195,7 @@ void calculate_most_common_values_from_array(TypeCacheEntry *typcache, RangeBoun
 	insert_challenger(ch_freq, &mf, cur_size, max_size, challenger, mcv, mcv_freqs);
 
 	// Calculate fractions
-	for (i = 0; i < cur_size; i++)
+	for (i = 0; i < *cur_size; i++)
 		mcv_fracs[i] = mcv_freqs[i] / a_size;
 
 	// Fill remaining slots with zeros
@@ -208,7 +217,6 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	int			non_null_cnt = 0;
 	int			non_empty_cnt = 0;
 	int			empty_cnt = 0;
-	int 		hist_cnt;
 	int			range_no;
 	int			slot_idx;
 	int			num_bins = stats->attr->attstattarget;
@@ -295,7 +303,7 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	/* We can only compute real stats if we found some non-null values. */
 	if (non_null_cnt > 0)
 	{
-		float4	   *bound_mcv_freqs;
+		float4	   *bound_mcv_fracs;
 		Datum	   *bound_mcv_values;
 		Datum	   *bound_hist_values;
 		Datum	   *length_hist_values;
@@ -340,14 +348,14 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 			if (num_mcv > num_bins)
 				num_mcv = num_bins + 1;
 
-			bound_mcv_freqs = (float4 *) palloc(2 * num_mcv * sizeof(float4));
+			bound_mcv_fracs = (float4 *) palloc(2 * num_mcv * sizeof(float4));
 			lower_mcv_values = (RangeBound *) palloc(num_mcv * sizeof(RangeBound));
 			upper_mcv_values = (RangeBound *) palloc(num_mcv * sizeof(RangeBound));
 
 			calculate_most_common_values_from_array(typcache, lowers, non_empty_cnt, num_mcv, 
-												&lower_mcv_count, lower_mcv_values, bound_mcv_freqs);
+												&lower_mcv_count, lower_mcv_values, bound_mcv_fracs);
 			calculate_most_common_values_from_array(typcache, uppers, non_empty_cnt, num_mcv, 
-												&upper_mcv_count, upper_mcv_values, bound_mcv_freqs + num_mcv);
+												&upper_mcv_count, upper_mcv_values, bound_mcv_fracs + num_mcv);
 
 			bound_mcv_values = (Datum *) palloc(num_mcv * sizeof(Datum));
 			for (i = 0; i < num_mcv; i++)
@@ -356,12 +364,12 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 				RangeBound	lower,
 							upper;
 
-				lower.val = NULL;
+				lower.val = (long unsigned int) NULL;
 				lower.inclusive = false;
 				lower.infinite = false;
 				lower.lower = true;
 
-				upper.val = NULL;
+				upper.val = (long unsigned int) NULL;
 				upper.inclusive = false;
 				upper.infinite = false;
 				upper.lower = false;
@@ -380,7 +388,7 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 			stats->stakind[slot_idx] = STATISTIC_KIND_BOUNDS_MCV;
 			stats->stavalues[slot_idx] = bound_mcv_values;
 			stats->numvalues[slot_idx] = num_mcv;
-			stats->stanumbers[slot_idx] = bound_mcv_freqs;
+			stats->stanumbers[slot_idx] = bound_mcv_fracs;
 			stats->numnumbers[slot_idx] = 2 * num_mcv;
 			slot_idx++;
 
