@@ -305,8 +305,8 @@ rangejoinsel(PG_FUNCTION_ARGS)
 	SpecialJoinInfo	*sjinfo = PG_GETARG_POINTER(4);
 	Oid			collation = PG_GET_COLLATION();
 	VariableStatData vardata1, vardata2;
-	AttStatsSlot mcvstats1, histstats1;
-	AttStatsSlot mcvstats2, histstats2;
+	AttStatsSlot lower_mcvstats1, upper_mcvstats1, histstats1;
+	AttStatsSlot lower_mcvstats2, upper_mcvstats2, histstats2;
 	bool		reversed;
 	Selectivity	selec;
 	TypeCacheEntry *typcache = NULL;
@@ -314,26 +314,33 @@ rangejoinsel(PG_FUNCTION_ARGS)
 	AttStatsSlot sslot;
 	double empty_frac1, null_frac1, *mcvf1_upper, *mcvf1_lower;
 	double empty_frac2, null_frac2, *mcvf2_upper, *mcvf2_lower;
-	const RangeBound *hist1_lower, *hist1_upper, *mcv1_lower, *mcv1_upper;
-	const RangeBound *hist2_lower, *hist2_upper, *mcv2_lower, *mcv2_upper;
-	int nhist1, nmcv1, nhist2, nmcv2;
+	RangeBound *hist1_lower, *hist1_upper, *mcv1_lower, *mcv1_upper;
+	RangeBound *hist2_lower, *hist2_upper, *mcv2_lower, *mcv2_upper;
+	int nhist1, nmcv1_lower, nmcv1_upper, nhist2, nmcv2_lower, nmcv2_upper;
 	int i;
 	bool empty;
+	RangeBound tmp;
 
 	get_join_variables(root, args, sjinfo, &vardata1, &vardata2, &reversed);
 
 	selec = default_range_selectivity(operator);
 
 	if (HeapTupleIsValid(vardata1.statsTuple) &&
-		get_attstatsslot(&mcvstats1, vardata1.statsTuple,
-						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
+		get_attstatsslot(&lower_mcvstats1, vardata1.statsTuple,
+						 STATISTIC_KIND_LOWER_BOUNDS_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
+		get_attstatsslot(&upper_mcvstats1, vardata1.statsTuple,
+						 STATISTIC_KIND_UPPER_BOUNDS_MCV, InvalidOid,
 						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
 		get_attstatsslot(&histstats1, vardata1.statsTuple,
 						 STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
 						 ATTSTATSSLOT_VALUES) &&
 		HeapTupleIsValid(vardata2.statsTuple) &&
-		get_attstatsslot(&mcvstats2, vardata2.statsTuple,
-						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
+		get_attstatsslot(&lower_mcvstats2, vardata2.statsTuple,
+						 STATISTIC_KIND_LOWER_BOUNDS_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
+		get_attstatsslot(&upper_mcvstats2, vardata2.statsTuple,
+						 STATISTIC_KIND_UPPER_BOUNDS_MCV, InvalidOid,
 						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
 		get_attstatsslot(&histstats2, vardata2.statsTuple,
 						 STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
@@ -401,27 +408,44 @@ rangejoinsel(PG_FUNCTION_ARGS)
 			if (empty)
 				elog(ERROR, "bounds histogram contains an empty range");
 		}
+		
+		if (lower_mcvstats1.nvalues != lower_mcvstats1.nnumbers)
+			elog(ERROR, "lower bounds mcv values and frequencies don't match");
+		
+		if (upper_mcvstats1.nvalues != upper_mcvstats1.nnumbers)
+			elog(ERROR, "upper bounds mcv values and frequencies don't match");
 
-		nmcv1 = mcvstats1.nvalues;
-		mcv1_lower = (RangeBound *) palloc(sizeof(RangeBound) * nmcv1);
-		mcvf1_lower = (double *) palloc(sizeof(double) * nmcv1);
-		mcv1_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv1);
-		mcvf1_upper = (double *) palloc(sizeof(double) * nmcv1);
-		for (i = 0; i < nmcv1; i++)
+		nmcv1_lower = lower_mcvstats1.nvalues;
+		nmcv1_upper = upper_mcvstats1.nvalues;
+		mcv1_lower = (RangeBound *) palloc(sizeof(RangeBound) * nmcv1_lower);
+		mcvf1_lower = (double *) palloc(sizeof(double) * nmcv1_lower);
+		mcv1_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv1_upper);
+		mcvf1_upper = (double *) palloc(sizeof(double) * nmcv1_upper);
+
+		for (i = 0; i < nmcv1_lower; i++)
 		{
-			range_deserialize(typcache, DatumGetRangeTypeP(mcvstats1.values[i]),
-							&mcv1_lower[i], &mcv1_upper[i], &empty);
 
+			range_deserialize(typcache, DatumGetRangeTypeP(lower_mcvstats1.values[i]),
+							&mcv1_lower[i], &tmp, &empty);
 			/* The mcv should not contain any empty ranges */
 			if (empty)
-				elog(ERROR, "bounds mcv contains an empty range");
+				elog(ERROR, "bounds histogram contains an empty range");
 
-			/* The mcv frequencies should be twice the values (upper + lower) */
-			if (2 * mcvstats1.nvalues != mcvstats1.nnumbers)
-				elog(ERROR, "bounds mcv values and frequencies don't match");
+			mcvf1_lower[i] = lower_mcvstats1.numbers[i];
+			
+		}
 
-			mcvf1_lower[i] = mcvstats1.numbers[i];
-			mcvf1_upper[i] = mcvstats1.numbers[mcvstats1.nvalues + i];
+		for (i = 0; i < nmcv1_upper; i++)
+		{
+
+			range_deserialize(typcache, DatumGetRangeTypeP(upper_mcvstats1.values[i]),
+							&tmp, &mcv1_upper[i], &empty);
+			/* The mcv should not contain any empty ranges */
+			if (empty)
+				elog(ERROR, "bounds histogram contains an empty range");
+
+			mcvf1_upper[i] = upper_mcvstats1.numbers[i];
+			
 		}
 
 		/*
@@ -439,27 +463,44 @@ rangejoinsel(PG_FUNCTION_ARGS)
 			if (empty)
 				elog(ERROR, "bounds histogram contains an empty range");
 		}
+		
+		if (lower_mcvstats2.nvalues != lower_mcvstats2.nnumbers)
+			elog(ERROR, "lower bounds mcv values and frequencies don't match");
+		
+		if (upper_mcvstats2.nvalues != upper_mcvstats2.nnumbers)
+			elog(ERROR, "upper bounds mcv values and frequencies don't match");
 
-		nmcv2 = mcvstats2.nvalues;
-		mcv2_lower = (RangeBound *) palloc(sizeof(RangeBound) * nmcv2);
-		mcvf2_lower = (double *) palloc(sizeof(double) * nmcv2);
-		mcv2_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv2);
-		mcvf2_upper = (double *) palloc(sizeof(double) * nmcv2);
-		for (i = 0; i < nmcv2; i++)
+		nmcv2_lower = lower_mcvstats2.nvalues;
+		nmcv2_upper = upper_mcvstats2.nvalues;
+		mcv2_lower = (RangeBound *) palloc(sizeof(RangeBound) * nmcv2_lower);
+		mcvf2_lower = (double *) palloc(sizeof(double) * nmcv2_lower);
+		mcv2_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv2_upper);
+		mcvf2_upper = (double *) palloc(sizeof(double) * nmcv2_upper);
+
+		for (i = 0; i < nmcv2_lower; i++)
 		{
-			range_deserialize(typcache, DatumGetRangeTypeP(mcvstats2.values[i]),
-							&mcv2_lower[i], &mcv2_upper[i], &empty);
 
+			range_deserialize(typcache, DatumGetRangeTypeP(lower_mcvstats2.values[i]),
+							&mcv2_lower[i], &tmp, &empty);
 			/* The mcv should not contain any empty ranges */
 			if (empty)
-				elog(ERROR, "bounds mcv contains an empty range");
+				elog(ERROR, "lower bounds mcv contains an empty range");
 
-			/* The mcv frequencies should be twice the values (upper + lower) */
-			if (2 * mcvstats2.nvalues != mcvstats2.nnumbers)
-				elog(ERROR, "bounds mcv values and frequencies don't match");
+			mcvf2_lower[i] = lower_mcvstats2.numbers[i];
+			
+		}
 
-			mcvf2_lower[i] = mcvstats2.numbers[i];
-			mcvf2_upper[i] = mcvstats2.numbers[mcvstats2.nvalues + i];
+		for (i = 0; i < nmcv2_upper; i++)
+		{
+
+			range_deserialize(typcache, DatumGetRangeTypeP(upper_mcvstats2.values[i]),
+							&tmp, &mcv2_upper[i], &empty);
+			/* The mcv should not contain any empty ranges */
+			if (empty)
+				elog(ERROR, "upper bounds mcv contains an empty range");
+
+			mcvf2_upper[i] = upper_mcvstats2.numbers[i];
+			
 		}
 
 		switch(operator) {
@@ -471,14 +512,14 @@ rangejoinsel(PG_FUNCTION_ARGS)
 				 */
 				selec = 1;
 				selec -= calc_joint_lt_selectivity(typcache, 
-												mcv1_upper, mcvf1_upper, nmcv1, 
+												mcv1_upper, mcvf1_upper, nmcv1_upper, 
 												hist1_upper, nhist1, null_frac1, empty_frac1, 
-												mcv2_lower, mcvf2_lower, nmcv2, 
+												mcv2_lower, mcvf2_lower, nmcv2_lower, 
 												hist2_lower, nhist2, null_frac2, empty_frac2, false);
 				selec -= calc_joint_lt_selectivity(typcache, 
-												mcv2_upper, mcvf2_upper, nmcv2, 
+												mcv2_upper, mcvf2_upper, nmcv2_upper, 
 												hist2_upper, nhist2, null_frac2, empty_frac2, 
-												mcv1_lower, mcvf1_lower, nmcv1, 
+												mcv1_lower, mcvf1_lower, nmcv1_lower, 
 												hist1_lower, nhist1, null_frac1, empty_frac1, false);
 				break;
 			
@@ -486,9 +527,9 @@ rangejoinsel(PG_FUNCTION_ARGS)
 				// A < B starts by comparing lower bounds and if they are equal compares upper bounds
 				// We underestimate by comparing only the lower bounds
 				selec = calc_joint_lt_selectivity(typcache, 
-												mcv1_lower, mcvf1_lower, nmcv1, 
+												mcv1_lower, mcvf1_lower, nmcv1_lower, 
 												hist1_lower, nhist1, null_frac1, empty_frac1, 
-												mcv2_lower, mcvf2_lower, nmcv2, 
+												mcv2_lower, mcvf2_lower, nmcv2_lower, 
 												hist2_lower, nhist2, null_frac2, empty_frac2, false);
 				break;
 
@@ -497,9 +538,9 @@ rangejoinsel(PG_FUNCTION_ARGS)
 				// We overestimate by comparing only the lower bounds
 				// Higher accuracy would require us to add  P(lower1 = lower2) * P(upper2 <= upper1)
 				selec = calc_joint_lt_selectivity(typcache, 
-												mcv1_lower, mcvf1_lower, nmcv1, 
+												mcv1_lower, mcvf1_lower, nmcv1_lower, 
 												hist1_lower, nhist1, null_frac1, empty_frac1, 
-												mcv2_lower, mcvf2_lower, nmcv2, 
+												mcv2_lower, mcvf2_lower, nmcv2_lower, 
 												hist2_lower, nhist2, null_frac2, empty_frac2, false);
 				break;
 
@@ -508,9 +549,9 @@ rangejoinsel(PG_FUNCTION_ARGS)
 				// We underestimate by comparing only the lower bounds
 				// Higher accuracy would require us to add  P(lower1 = lower2) * P(upper2 <= upper1)
 				selec = calc_joint_lt_selectivity(typcache, 
-												mcv2_lower, mcvf2_lower, nmcv2, 
+												mcv2_lower, mcvf2_lower, nmcv2_lower, 
 												hist2_lower, nhist2, null_frac2, empty_frac2,
-												mcv1_lower, mcvf1_lower, nmcv1, 
+												mcv1_lower, mcvf1_lower, nmcv1_lower, 
 												hist1_lower, nhist1, null_frac1, empty_frac1, false);
 				break;
 
@@ -519,36 +560,38 @@ rangejoinsel(PG_FUNCTION_ARGS)
 				// We underestimate by comparing only the lower bounds
 				// Higher accuracy would require us to add  P(lower1 = lower2) * P(upper2 <= upper1)
 				selec = calc_joint_lt_selectivity(typcache, 
-												mcv2_lower, mcvf2_lower, nmcv2, 
+												mcv2_lower, mcvf2_lower, nmcv2_lower, 
 												hist2_lower, nhist2, null_frac2, empty_frac2,
-												mcv1_lower, mcvf1_lower, nmcv1, 
+												mcv1_lower, mcvf1_lower, nmcv1_lower, 
 												hist1_lower, nhist1, null_frac1, empty_frac1, false);
 				break;
 
 			case OID_RANGE_LEFT_OP:
 				/* var1 << var2 when upper(var1) < lower(var2) */
 				selec = calc_joint_lt_selectivity(typcache, 
-												mcv1_upper, mcvf1_upper, nmcv1, 
+												mcv1_upper, mcvf1_upper, nmcv1_upper, 
 												hist1_upper, nhist1, null_frac1, empty_frac1, 
-												mcv2_lower, mcvf2_lower, nmcv2, 
+												mcv2_lower, mcvf2_lower, nmcv2_lower, 
 												hist2_lower, nhist2, null_frac2, empty_frac2, false);
 				break;
 
 			case OID_RANGE_RIGHT_OP:
 				/* var1 >> var2 when upper(var2) < lower(var1) */
 				selec = calc_joint_lt_selectivity(typcache,
-												mcv2_upper, mcvf2_upper, nmcv2, 
+												mcv2_upper, mcvf2_upper, nmcv2_upper, 
 												hist2_upper, nhist2, null_frac2, empty_frac2, 
-												mcv1_lower, mcvf1_lower, nmcv1, 
+												mcv1_lower, mcvf1_lower, nmcv1_lower, 
 												hist1_lower, nhist1, null_frac1, empty_frac2, false);
 				break;
 			default:
 				break;
 		}
 
-		free_attstatsslot(&mcvstats1);
+		free_attstatsslot(&lower_mcvstats1);
+		free_attstatsslot(&upper_mcvstats1);
 		free_attstatsslot(&histstats1);
-		free_attstatsslot(&mcvstats2);
+		free_attstatsslot(&lower_mcvstats2);
+		free_attstatsslot(&upper_mcvstats2);
 		free_attstatsslot(&histstats2);
 
 	}
@@ -557,9 +600,6 @@ rangejoinsel(PG_FUNCTION_ARGS)
 	ReleaseVariableStats(vardata2);
 
 	CLAMP_PROBABILITY(selec);
-
-	fprintf(stdout, "Join selectivity: %f\n", selec);
-    fflush(stdout);
 
 	PG_RETURN_FLOAT8((float8) selec);
 }
@@ -834,8 +874,8 @@ calc_mcv_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 					  const RangeType *constval, Oid operator, double *sumcommon)
 {
 
-	AttStatsSlot mcvstats;
-	int			nmcv;
+	AttStatsSlot lower_mcv_stats, upper_mcv_stats;
+	int			nmcv_lower, nmcv_upper;
 	double	   *mcvf_lower;
 	double	   *mcvf_upper;
 	RangeBound *mcv_lower;
@@ -845,6 +885,7 @@ calc_mcv_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 	RangeBound	const_upper;
 	bool		empty;
 	double		mcv_selec;
+	RangeBound	tmp;
 
 	/* Can't use the mcv with insecure range support functions */
 	if (!statistic_proc_security_check(vardata,
@@ -857,31 +898,52 @@ calc_mcv_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 
 	/* Try to get mcv of ranges */
 	if (HeapTupleIsValid(vardata->statsTuple) &&
-		get_attstatsslot(&mcvstats, vardata->statsTuple,
-						 STATISTIC_KIND_BOUNDS_MCV, InvalidOid,
+		get_attstatsslot(&lower_mcv_stats, vardata->statsTuple,
+						 STATISTIC_KIND_LOWER_BOUNDS_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) &&
+		get_attstatsslot(&upper_mcv_stats, vardata->statsTuple,
+						 STATISTIC_KIND_UPPER_BOUNDS_MCV, InvalidOid,
 						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)) {
 		
 
-		nmcv = mcvstats.nvalues;
-		mcv_lower = (RangeBound *) palloc(sizeof(RangeBound) * nmcv);
-		mcvf_lower = (double *) palloc(sizeof(double) * nmcv);
-		mcv_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv);
-		mcvf_upper = (double *) palloc(sizeof(double) * nmcv);
-		for (i = 0; i < nmcv; i++)
-		{
-			range_deserialize(typcache, DatumGetRangeTypeP(mcvstats.values[i]),
-							&mcv_lower[i], &mcv_upper[i], &empty);
+		if (lower_mcv_stats.nvalues != lower_mcv_stats.nnumbers)
+			elog(ERROR, "lower bounds mcv values and frequencies don't match");
 
+		if (lower_mcv_stats.nvalues != lower_mcv_stats.nnumbers)
+			elog(ERROR, "upper bounds mcv values and frequencies don't match");
+
+		nmcv_lower = lower_mcv_stats.nvalues;
+		mcv_lower = (RangeBound *) palloc(sizeof(RangeBound) * nmcv_lower);
+		mcvf_lower = (double *) palloc(sizeof(double) * nmcv_lower);
+
+		nmcv_upper = upper_mcv_stats.nvalues;
+		mcv_upper = (RangeBound *) palloc(sizeof(RangeBound) * nmcv_upper);
+		mcvf_upper = (double *) palloc(sizeof(double) * nmcv_upper);
+
+		for (i = 0; i < nmcv_lower; i++)
+		{
+
+			range_deserialize(typcache, DatumGetRangeTypeP(lower_mcv_stats.values[i]),
+							&mcv_lower[i], &tmp, &empty);
 			/* The mcv should not contain any empty ranges */
 			if (empty)
-				elog(ERROR, "bounds mcv contains an empty range");
+				elog(ERROR, "lower bounds mcv contains an empty range");
 
-			/* The mcv frequencies should be twice the values (upper + lower) */
-			if (2 * mcvstats.nvalues != mcvstats.nnumbers)
-				elog(ERROR, "bounds mcv values and frequencies don't match");
+			mcvf_lower[i] = lower_mcv_stats.numbers[i];
+			
+		}
 
-			mcvf_lower[i] = mcvstats.numbers[i];
-			mcvf_upper[i] = mcvstats.numbers[mcvstats.nvalues + i];
+		for (i = 0; i < nmcv_upper; i++)
+		{
+
+			range_deserialize(typcache, DatumGetRangeTypeP(upper_mcv_stats.values[i]),
+							&tmp, &mcv_upper[i], &empty);
+			/* The mcv should not contain any empty ranges */
+			if (empty)
+				elog(ERROR, "uppwer bounds mcv contains an empty range");
+
+			mcvf_upper[i] = upper_mcv_stats.numbers[i];
+			
 		}
 
 		/* Extract the bounds of the constant value. */
@@ -904,46 +966,46 @@ calc_mcv_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 				* lower bound.
 				*/
 				mcv_selec = calc_mcv_selectivity_scalar(typcache, &const_lower, 
-								mcv_lower, mcvf_lower, nmcv, false, sumcommon);
+								mcv_lower, mcvf_lower, nmcv_lower, false, sumcommon);
 				break;
 
 			case OID_RANGE_LESS_EQUAL_OP:
 				mcv_selec = calc_mcv_selectivity_scalar(typcache, &const_lower, 
-								mcv_lower, mcvf_lower, nmcv, true, sumcommon);
+								mcv_lower, mcvf_lower, nmcv_lower, true, sumcommon);
 				break;
 
 			case OID_RANGE_GREATER_OP:
 				mcv_selec = 1 - calc_mcv_selectivity_scalar(typcache, &const_lower, 
-								mcv_lower, mcvf_lower, nmcv, true, sumcommon);
+								mcv_lower, mcvf_lower, nmcv_lower, true, sumcommon);
 				break;
 
 			case OID_RANGE_GREATER_EQUAL_OP:
 				mcv_selec = 1 - calc_mcv_selectivity_scalar(typcache, &const_lower, 
-								mcv_lower, mcvf_lower, nmcv, false, sumcommon);
+								mcv_lower, mcvf_lower, nmcv_lower, false, sumcommon);
 				break;
 
 			case OID_RANGE_LEFT_OP:
 				/* var << const when upper(var) < lower(const) */
 				mcv_selec = calc_mcv_selectivity_scalar(typcache, &const_lower, 
-								mcv_upper, mcvf_upper, nmcv, false, sumcommon);
+								mcv_upper, mcvf_upper, nmcv_upper, false, sumcommon);
 				break;
 
 			case OID_RANGE_RIGHT_OP:
 				/* var >> const when lower(var) > upper(const) */
 				mcv_selec = 1 - calc_mcv_selectivity_scalar(typcache, &const_upper, 
-								mcv_lower, mcvf_lower, nmcv, true, sumcommon);
+								mcv_lower, mcvf_lower, nmcv_lower, true, sumcommon);
 				break;
 
 			case OID_RANGE_OVERLAPS_RIGHT_OP:
 				/* compare lower bounds */
 				mcv_selec = 1 - calc_mcv_selectivity_scalar(typcache, &const_lower, 
-								mcv_lower, mcvf_lower, nmcv, false, sumcommon);
+								mcv_lower, mcvf_lower, nmcv_lower, false, sumcommon);
 				break;
 
 			case OID_RANGE_OVERLAPS_LEFT_OP:
 				/* compare upper bounds */
 				mcv_selec = calc_mcv_selectivity_scalar(typcache, &const_upper, 
-								mcv_upper, mcvf_upper, nmcv, true, sumcommon);
+								mcv_upper, mcvf_upper, nmcv_upper, true, sumcommon);
 				break;
 
 			case OID_RANGE_OVERLAP_OP:
@@ -961,9 +1023,9 @@ calc_mcv_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 				* constant, so just treat it the same as &&.
 				*/
 				mcv_selec = calc_mcv_selectivity_scalar(typcache, &const_lower, 
-								mcv_upper, mcvf_upper, nmcv, false, sumcommon);
+								mcv_upper, mcvf_upper, nmcv_upper, false, sumcommon);
 				mcv_selec += 1 - calc_mcv_selectivity_scalar(typcache, &const_upper, 
-								mcv_lower, mcvf_lower, nmcv, true, sumcommon);
+								mcv_lower, mcvf_lower, nmcv_lower, true, sumcommon);
 				mcv_selec = 1.0 - mcv_selec;
 				break;
 		}

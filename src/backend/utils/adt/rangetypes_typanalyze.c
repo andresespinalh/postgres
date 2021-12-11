@@ -196,7 +196,7 @@ void calculate_most_common_values_from_array(TypeCacheEntry *typcache, RangeBoun
 
 	// Calculate fractions
 	for (i = 0; i < *cur_size; i++)
-		mcv_fracs[i] = mcv_freqs[i] / a_size;
+		mcv_fracs[i] = ( (float4) mcv_freqs[i] ) / a_size;
 
 	// Fill remaining slots with zeros
 	for (; i < max_size; i++)
@@ -303,8 +303,10 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	/* We can only compute real stats if we found some non-null values. */
 	if (non_null_cnt > 0)
 	{
-		float4	   *bound_mcv_fracs;
-		Datum	   *bound_mcv_values;
+		float4	   *lower_mcv_fracs;
+		float4	   *upper_mcv_fracs;
+		Datum	   *lower_mcv_values_datum;
+		Datum	   *upper_mcv_values_datum;
 		Datum	   *bound_hist_values;
 		Datum	   *length_hist_values;
 		RangeBound *lower_mcv_values;
@@ -318,6 +320,7 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 					i;
 		MemoryContext old_cxt;
 		float4	   *emptyfrac;
+		RangeBound neg_inf, pos_inf;
 
 		stats->stats_valid = true;
 		/* Do the simple null-frac and width stats */
@@ -348,48 +351,51 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 			if (num_mcv > num_bins)
 				num_mcv = num_bins + 1;
 
-			bound_mcv_fracs = (float4 *) palloc(2 * num_mcv * sizeof(float4));
+			lower_mcv_fracs = (float4 *) palloc(num_mcv * sizeof(float4));
+			upper_mcv_fracs = (float4 *) palloc(num_mcv * sizeof(float4));
 			lower_mcv_values = (RangeBound *) palloc(num_mcv * sizeof(RangeBound));
 			upper_mcv_values = (RangeBound *) palloc(num_mcv * sizeof(RangeBound));
 
 			calculate_most_common_values_from_array(typcache, lowers, non_empty_cnt, num_mcv, 
-												&lower_mcv_count, lower_mcv_values, bound_mcv_fracs);
+												&lower_mcv_count, lower_mcv_values, lower_mcv_fracs);
 			calculate_most_common_values_from_array(typcache, uppers, non_empty_cnt, num_mcv, 
-												&upper_mcv_count, upper_mcv_values, bound_mcv_fracs + num_mcv);
+												&upper_mcv_count, upper_mcv_values, upper_mcv_fracs);
 
-			bound_mcv_values = (Datum *) palloc(num_mcv * sizeof(Datum));
-			for (i = 0; i < num_mcv; i++)
-			{
+			neg_inf.inclusive = false;
+			neg_inf.val = 0;
+			neg_inf.infinite = true;
+			neg_inf.lower = true;
+			pos_inf.inclusive = false;
+			pos_inf.val = 0;
+			pos_inf.infinite = true;
+			pos_inf.lower = false;
 
-				RangeBound	lower,
-							upper;
+			lower_mcv_values_datum = (Datum *) palloc(lower_mcv_count * sizeof(Datum));
+			for (i = 0; i < lower_mcv_count; i++)
+				lower_mcv_values_datum[i] = PointerGetDatum(range_serialize(typcache,
+																	   &lower_mcv_values[i],
+																	   &pos_inf,
+																	   false));
 
-				lower.val = (long unsigned int) NULL;
-				lower.inclusive = false;
-				lower.infinite = false;
-				lower.lower = true;
-
-				upper.val = (long unsigned int) NULL;
-				upper.inclusive = false;
-				upper.infinite = false;
-				upper.lower = false;
-				
-				if(i < lower_mcv_count)
-					lower = lower_mcv_values[i];
-				
-				if(i < upper_mcv_count)
-					upper = upper_mcv_values[i];
-
-				bound_mcv_values[i] = PointerGetDatum(range_serialize(
-					typcache, &lower, &upper, false));
-
-			}
+			upper_mcv_values_datum = (Datum *) palloc(upper_mcv_count * sizeof(Datum));
+			for (i = 0; i < upper_mcv_count; i++)
+				upper_mcv_values_datum[i] = PointerGetDatum(range_serialize(typcache,
+																	   &neg_inf,
+																	   &upper_mcv_values[i],
+																	   false));
 			
-			stats->stakind[slot_idx] = STATISTIC_KIND_BOUNDS_MCV;
-			stats->stavalues[slot_idx] = bound_mcv_values;
-			stats->numvalues[slot_idx] = num_mcv;
-			stats->stanumbers[slot_idx] = bound_mcv_fracs;
-			stats->numnumbers[slot_idx] = 2 * num_mcv;
+			stats->stakind[slot_idx] = STATISTIC_KIND_LOWER_BOUNDS_MCV;
+			stats->stavalues[slot_idx] = lower_mcv_values_datum;
+			stats->numvalues[slot_idx] = lower_mcv_count;
+			stats->stanumbers[slot_idx] = lower_mcv_fracs;
+			stats->numnumbers[slot_idx] = lower_mcv_count;
+			slot_idx++;
+			
+			stats->stakind[slot_idx] = STATISTIC_KIND_UPPER_BOUNDS_MCV;
+			stats->stavalues[slot_idx] = upper_mcv_values_datum;
+			stats->numvalues[slot_idx] = upper_mcv_count;
+			stats->stanumbers[slot_idx] = upper_mcv_fracs;
+			stats->numnumbers[slot_idx] = upper_mcv_count;
 			slot_idx++;
 
 		}
